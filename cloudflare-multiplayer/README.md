@@ -39,3 +39,4 @@ npx wrangler dev
 ```
 
 本地 Worker 默认通常是 `http://127.0.0.1:8787`，可临时把 `multiplayer-config.js` 的 `serverUrl` 改为该地址。
+Cloudflare 自动部署初始化。
