@@ -30,6 +30,9 @@ let presenceTimer=0;
 let panelOpen=false;
 let busy=false;
 let injectQueued=false;
+let gameApplyQueued=false;
+let gameApplyPending=false;
+let gameApplyWaitTimer=0;
 let runtime={status:session?'connecting':'idle',players:[],feed:[],revision:0,error:'',roomExists:true};
 function clone(v){try{return JSON.parse(JSON.stringify(v))}catch(_){return v}}
 function cleanName(v){return String(v||'').replace(/[<>\n\r]/g,'').trim().slice(0,14)||'调查员'}
@@ -182,18 +185,56 @@ function scheduleReconnect(){
   reconnectAttempts++;
   reconnectTimer=setTimeout(()=>{reconnectTimer=0;connect()},delay);
 }
+function runGameApply(){
+  if(!gameApplyPending||gameApplyQueued)return;
+  const bridge=window.K417GameBridge;
+  if(!bridge?.applyExternalSave){
+    clearTimeout(gameApplyWaitTimer);
+    gameApplyWaitTimer=setTimeout(()=>{
+      gameApplyWaitTimer=0;
+      if(gameApplyPending&&window.K417GameBridge?.applyExternalSave)runGameApply();
+      else if(gameApplyPending){
+        runtime.error='共享进度已保存，但当前页面暂时无法实时刷新。请稍候或手动刷新一次；案件进度不会丢失。';
+        renderPanel();
+      }
+    },1500);
+    return;
+  }
+  gameApplyQueued=true;
+  requestAnimationFrame(()=>{
+    gameApplyQueued=false;
+    if(!gameApplyPending)return;
+    try{
+      gameApplyPending=false;
+      bridge.applyExternalSave();
+      runtime.error='';
+      const latest=readSave();
+      scheduleInjectUI();renderPanel();if(latest)schedulePresence(latest);
+    }catch(e){
+      console.error('[K417 multiplayer live sync]',e);
+      runtime.error='队友进度已经保存，但页面实时刷新失败。继续操作前建议手动刷新一次。';
+      renderPanel();
+    }
+  });
+}
+function scheduleGameApply(){gameApplyPending=true;runGameApply()}
+window.addEventListener('k417:game-ready',()=>{if(gameApplyPending)runGameApply()});
 function handleMessage(m){
   if(m.type==='error'){runtime.error=m.error||'联机服务器错误';toast(runtime.error,'bad');renderPanel();return}
   if(m.type==='snapshot'){
-    runtime.revision=Number(m.revision)||0;runtime.players=Array.isArray(m.players)?m.players:[];runtime.feed=Array.isArray(m.feed)?m.feed.slice(-50):runtime.feed;
+    const incomingRevision=Number(m.revision)||0;if(incomingRevision<runtime.revision)return;
+    runtime.revision=incomingRevision;runtime.players=Array.isArray(m.players)?m.players:[];runtime.feed=Array.isArray(m.feed)?m.feed.slice(-50):runtime.feed;
     const wasFresh=!!session?.freshJoin;if(session){session.host=!!m.host;session.freshJoin=false;persistSession()}
     firstSnapshotPending=false;
-    const remote=captureShared(m.state||{}),full=readSave()||{},local=captureShared(full);
+    const debug=typeof window.__K417_DEBUG_STATE__==='function'?window.__K417_DEBUG_STATE__():null;
+    const full=readSave()||debug||{},remote=captureShared(m.state||{}),local=captureShared(full);
     lastSentShared=signature(remote);
+    if(wasFresh)toast(`已进入调查组 ${session.roomCode}`,'good');
     if(signature(local)!==signature(remote)){
-      const next={...full,...remote,started:true};writeSave(next);scheduleInjectUI();renderPanel();setTimeout(()=>location.reload(),90);return;
+      const next={...full,...remote,version:full.version||debug?.version||'6.0.0',started:true};
+      writeSave(next);scheduleGameApply();scheduleInjectUI();renderPanel();schedulePresence(next);return;
     }
-    if(wasFresh)toast(`已进入调查组 ${session.roomCode}`,'good');scheduleInjectUI();renderPanel();schedulePresence(full);return;
+    scheduleInjectUI();renderPanel();schedulePresence(full);return;
   }
   if(m.type==='presence'){
     runtime.players=Array.isArray(m.players)?m.players:[];const me=runtime.players.find(p=>p.playerId===session?.playerId);if(me&&session&&session.host!==!!me.host){session.host=!!me.host;persistSession()}scheduleInjectUI();renderPanel();return;
